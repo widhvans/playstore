@@ -1,50 +1,44 @@
-import discord
-from discord.ext import commands
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google_play_scraper as gps
 import aiohttp
 import config
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send an app name to get its icon!")
 
-@bot.event
-async def on_ready():
-    print(f'Bot is ready as {bot.user}')
-
-@bot.command()
-async def app(ctx, *, app_name):
+async def get_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    app_name = update.message.text
     try:
-        # Search for the app on Google Play Store
+        # Search for the app
         results = gps.search(app_name, lang='en', country='us')
         if not results:
-            await ctx.send(f"No app found for '{app_name}'")
+            await update.message.reply_text(f"No app found for '{app_name}'")
             return
 
-        # Get the first result's app ID
+        # Get app details
         app_id = results[0]['appId']
-        # Fetch app details
         app_details = gps.app(app_id, lang='en', country='us')
-        
-        # Get app icon URL
         icon_url = app_details['icon']
         app_title = app_details['title']
 
-        # Download the icon
+        # Download icon
         async with aiohttp.ClientSession() as session:
             async with session.get(icon_url) as resp:
                 if resp.status == 200:
                     icon_data = await resp.read()
-                    # Save icon temporarily
-                    with open('temp_icon.png', 'wb') as f:
-                        f.write(icon_data)
-                    
-                    # Send the icon to Discord
-                    file = discord.File('temp_icon.png', filename=f"{app_title}_icon.png")
-                    await ctx.send(f"**{app_title}** Icon:", file=file)
+                    # Send icon
+                    await update.message.reply_photo(photo=icon_data, caption=f"{app_title} Icon")
                 else:
-                    await ctx.send(f"Could not download icon for '{app_title}'")
+                    await update.message.reply_text(f"Could not download icon for '{app_title}'")
     except Exception as e:
-        await ctx.send(f"Error: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
 
-bot.run(config.BOT_TOKEN)
+def main():
+    app = Application.builder().token(config.BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_app))
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
