@@ -1,5 +1,5 @@
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google_play_scraper as gps
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
@@ -7,38 +7,19 @@ import io
 import os
 import logging
 import config
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-import asyncio
+import tempfile
+import shutil
 
 # Setup logging (only errors and key actions)
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('httpx').setLevel(logging.WARNING)  # Suppress httpx logs
 logger = logging.getLogger(__name__)
 
-INPUT_DIR = "/root/playstore/input"
-OUTPUT_DIR = "/root/playstore/output"
-
-# Ensure directories exist
-os.makedirs(INPUT_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-class FileHandler(FileSystemEventHandler):
-    def __init__(self, bot):
-        self.bot = bot
-
-    def on_created(self, event):
-        if not event.is_directory and event.src_path.endswith('.apk'):
-            filename = os.path.basename(event.src_path)
-            asyncio.run_coroutine_threadsafe(
-                process_apk(None, filename, self.bot), asyncio.get_event_loop()
-            )
+CHUNK_SIZE = 50 * 1024 * 1024  # 50MB
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Upload your APK (up to 500MB) to /root/playstore/input/ on the server via SCP/SFTP. "
-        "Use /process <filename> to process it, or I'll auto-detect new files. "
-        "I'll add the app name to the icon and save the APK and icon to /root/playstore/output/."
+        "Send an APK file (up to 500MB). I'll add the app name to its icon and re-upload both."
     )
     logger.info("Bot started")
 
@@ -47,35 +28,55 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update and update.message:
         await update.message.reply_text(f"Error: {str(context.error)}")
 
-async def process_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Please provide a filename: /process <filename.apk>")
+async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.document
+    if not file or not file.file_name.endswith('.apk'):
+        await update.message.reply_text("Please send an APK file!")
+        logger.warning("Non-APK file received")
         return
-    filename = context.args[0]
-    if not filename.endswith('.apk'):
-        await update.message.reply_text("Please provide an APK filename!")
-        logger.warning(f"Invalid filename: {filename}")
-        return
-    apk_path = os.path.join(INPUT_DIR, filename)
-    if not os.path.exists(apk_path):
-        await update.message.reply_text(f"File not found: {apk_path}")
-        logger.warning(f"File not found: {apk_path}")
-        return
-    await process_apk(update, filename, context.bot)
 
-async def process_apk(update: Update, filename: str, bot):
-    apk_path = os.path.join(INPUT_DIR, filename)
-    app_name = os.path.splitext(filename)[0]
-    output_apk_path = os.path.join(OUTPUT_DIR, filename)
+    # Extract app name from filename
+    app_name = os.path.splitext(file.file_name)[0]
+    temp_dir = tempfile.mkdtemp()
+    apk_path = os.path.join(temp_dir, file.file_name)
 
     try:
+        # Download APK (handle large files)
+        file_obj = await file.get_file()
+        file_size = file.file_size
+        logger.info(f"Downloading APK: {file.file_name} ({file_size} bytes)")
+
+        if file_size <= CHUNK_SIZE:
+            # Direct download for ≤50MB
+            await file_obj.download_to_drive(apk_path)
+        else:
+            # Chunked download for >50MB
+            chunks = []
+            offset = 0
+            while offset < file_size:
+                chunk_path = os.path.join(temp_dir, f"chunk_{offset}.part")
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(file_obj.file_path, headers={'Range': f'bytes={offset}-{offset+CHUNK_SIZE-1}'}) as resp:
+                        if resp.status != 206:
+                            raise Exception("Chunk download failed")
+                        with open(chunk_path, 'wb') as f:
+                            f.write(await resp.read())
+                chunks.append(chunk_path)
+                offset += CHUNK_SIZE
+            # Reassemble chunks
+            with open(apk_path, 'wb') as f:
+                for chunk_path in chunks:
+                    with open(chunk_path, 'rb') as cf:
+                        f.write(cf.read())
+                    os.remove(chunk_path)
+
         # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
         if not results:
-            message = f"No app found for '{app_name}'"
-            logger.warning(message)
-            if update:
-                await update.message.reply_text(message)
+            await update.message.reply_text(f"No app found for '{app_name}'")
+            logger.warning(f"No app found for: {app_name}")
+            os.remove(apk_path)
+            shutil.rmtree(temp_dir)
             return
 
         # Get app details
@@ -89,10 +90,10 @@ async def process_apk(update: Update, filename: str, bot):
         async with aiohttp.ClientSession() as session:
             async with session.get(icon_url) as resp:
                 if resp.status != 200:
-                    message = f"Could not download icon for '{app_title}'"
-                    logger.error(message)
-                    if update:
-                        await update.message.reply_text(message)
+                    await update.message.reply_text(f"Could not download icon for '{app_title}'")
+                    logger.error(f"Failed to download icon: {icon_url}")
+                    os.remove(apk_path)
+                    shutil.rmtree(temp_dir)
                     return
                 icon_data = await resp.read()
 
@@ -114,53 +115,61 @@ async def process_apk(update: Update, filename: str, bot):
         icon_buffer = io.BytesIO()
         icon_img.save(icon_buffer, format="PNG")
         icon_buffer.seek(0)
-        icon_path = os.path.join(OUTPUT_DIR, f"{app_title}_icon.png")
-        with open(icon_path, 'wb') as f:
-            f.write(icon_buffer.getvalue())
         logger.info(f"Processed icon for {app_title}")
 
-        # Copy APK to output directory (preserve original name)
-        os.rename(apk_path, output_apk_path)
-        logger.info(f"Moved APK to {output_apk_path}")
-
-        # Send icon via Telegram
-        if update:
-            with open(icon_path, 'rb') as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=f"{app_title}_icon.png",
-                    caption=f"{app_title} Renamed Icon"
-                )
+        # Re-upload files
+        if file_size <= CHUNK_SIZE:
+            # Direct upload for ≤50MB
+            await update.message.reply_document(document=open(apk_path, "rb"),
+                                             filename=file.file_name,
+                                             caption=f"{app_title} APK")
+            logger.info(f"Re-uploaded APK to Telegram: {file.file_name}")
+        else:
+            # Chunked upload for >50MB
+            chunk_paths = []
+            with open(apk_path, 'rb') as f:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    chunk_path = os.path.join(temp_dir, f"chunk_{len(chunk_paths)}.part")
+                    with open(chunk_path, 'wb') as cf:
+                        cf.write(chunk)
+                    chunk_paths.append(chunk_path)
+            for i, chunk_path in enumerate(chunk_paths):
+                await update.message.reply_document(document=open(chunk_path, "rb"),
+                                                 filename=f"{file.file_name}.part{i}",
+                                                 caption=f"Chunk {i+1} of {app_title} APK")
+                logger.info(f"Uploaded chunk {i+1} for {file.file_name}")
             await update.message.reply_text(
-                f"APK processed! Find it at: {output_apk_path}\nIcon saved at: {icon_path}"
+                f"APK >50MB split into {len(chunk_paths)} chunks. "
+                "Download all parts and combine with: cat {file.file_name}.part* > {file.file_name}"
             )
-        logger.info(f"Sent results for {app_title}")
+
+        # Send modified icon
+        await update.message.reply_document(document=icon_buffer,
+                                         filename=f"{app_title}_icon.png",
+                                         caption=f"{app_title} Renamed Icon")
+        logger.info(f"Sent icon for {app_title}")
+
+        # Clean up
+        os.remove(apk_path)
+        shutil.rmtree(temp_dir)
+        logger.info(f"Cleaned up {apk_path}")
 
     except Exception as e:
         logger.error(f"Error processing {app_name}: {str(e)}")
-        if update:
-            await update.message.reply_text(f"Error: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
         if os.path.exists(apk_path):
             os.remove(apk_path)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("process", process_command))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_apk))
     app.add_error_handler(error_handler)
-
-    # Setup file watcher
-    event_handler = FileHandler(app.bot)
-    observer = Observer()
-    observer.schedule(event_handler, INPUT_DIR, recursive=False)
-    observer.start()
-    logger.info("File watcher started")
-
     app.run_polling()
-
-    # Stop observer when bot stops
-    observer.stop()
-    observer.join()
 
 if __name__ == '__main__':
     main()
