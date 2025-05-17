@@ -28,17 +28,28 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Forward message to processing channel
-        await update.message.forward(chat_id=config.PROCESSING_CHANNEL_ID)
+        forwarded_message = await update.message.forward(chat_id=config.PROCESSING_CHANNEL_ID)
         logger.info(f"Forwarded APK: {file.file_name} ({file.file_size} bytes)")
         await update.message.reply_text("APK forwarded for processing. Please wait for results.")
+        # Monitor channel for results
+        context.user_data['forwarded_message_id'] = forwarded_message.message_id
     except Exception as e:
         logger.error(f"Error forwarding {file.file_name}: {str(e)}")
         await update.message.reply_text(f"Error: {str(e)}")
+
+async def handle_channel_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.channel_post and update.channel_post.chat_id == config.PROCESSING_CHANNEL_ID:
+        if update.channel_post.document and update.channel_post.document.file_name.endswith(('.apk', '.png')):
+            forwarded_message_id = context.user_data.get('forwarded_message_id')
+            if forwarded_message_id and update.channel_post.reply_to_message and update.channel_post.reply_to_message.message_id == forwarded_message_id:
+                await update.channel_post.forward(chat_id=update.effective_user.id)
+                logger.info(f"Forwarded result: {update.channel_post.document.file_name}")
 
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_apk))
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_update))
     app.add_error_handler(error_handler)
     app.run_polling()
 
