@@ -4,6 +4,7 @@ import google_play_scraper as gps
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
+import os
 import config
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
