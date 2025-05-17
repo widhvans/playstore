@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Upload your APK (up to 500MB) to https://transfer.sh and send the download URL. "
-        "I'll add the app name to its icon and provide a new URL for the APK."
+        "Send an APK file (≤50MB) or a URL from https://transfer.sh (up to 500MB). "
+        "I'll add the app name to its icon and re-upload the APK."
     )
     logger.info("Bot started")
 
@@ -24,6 +24,38 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
     if update and update.message:
         await update.message.reply_text(f"Error: {str(context.error)}")
+
+async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.document
+    if not file or not file.file_name.endswith('.apk'):
+        await update.message.reply_text("Please send an APK file!")
+        logger.warning("Non-APK file received")
+        return
+
+    # Check file size
+    if file.file_size > 50 * 1024 * 1024:
+        await update.message.reply_text(
+            "File >50MB. Upload to https://transfer.sh and send the download URL."
+        )
+        logger.info(f"File too large: {file.file_name} ({file.file_size} bytes)")
+        return
+
+    # Extract app name from filename
+    app_name = os.path.splitext(file.file_name)[0]
+    apk_path = f"{app_name}.apk"
+
+    try:
+        # Download APK from Telegram
+        file_obj = await file.get_file()
+        await file_obj.download_to_drive(apk_path)
+        logger.info(f"Downloaded APK: {apk_path}")
+
+        await process_apk(update, app_name, apk_path, file.file_name)
+    except Exception as e:
+        logger.error(f"Error processing {app_name}: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
+        if os.path.exists(apk_path):
+            os.remove(apk_path)
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
@@ -46,8 +78,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 with open(apk_path, 'wb') as f:
                     f.write(await resp.read())
-        logger.info(f"Downloaded APK: {apk_path}")
+        logger.info(f"Downloaded APK from URL: {apk_path}")
 
+        await process_apk(update, app_name, apk_path, os.path.basename(url))
+    except Exception as e:
+        logger.error(f"Error processing URL {url}: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
+        if os.path.exists(apk_path):
+            os.remove(apk_path)
+
+async def process_apk(update: Update, app_name: str, apk_path: str, original_filename: str):
+    try:
         # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
         if not results:
@@ -93,26 +134,33 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon_buffer.seek(0)
         logger.info(f"Processed icon for {app_title}")
 
-        # Re-upload APK to Transfer.sh
-        async with aiohttp.ClientSession() as session:
-            with open(apk_path, 'rb') as f:
-                async with session.put(f"https://transfer.sh/{os.path.basename(apk_path)}", data=f) as resp:
-                    if resp.status != 200:
-                        await update.message.reply_text("Could not upload APK to Transfer.sh")
-                        logger.error(f"Failed to upload APK to Transfer.sh: {resp.status}")
-                        os.remove(apk_path)
-                        return
-                    download_url = await resp.text()
-        logger.info(f"Uploaded APK to Transfer.sh: {download_url}")
+        # Check APK size for re-upload
+        apk_size = os.path.getsize(apk_path)
+        if apk_size <= 50 * 1024 * 1024:
+            # Send original APK with same name
+            await update.message.reply_document(document=open(apk_path, "rb"),
+                                             filename=original_filename,
+                                             caption=f"{app_title} APK")
+            logger.info(f"Re-uploaded APK to Telegram: {original_filename}")
+        else:
+            # Upload to Transfer.sh for >50MB
+            async with aiohttp.ClientSession() as session:
+                with open(apk_path, 'rb') as f:
+                    async with session.put(f"https://transfer.sh/{original_filename}", data=f) as resp:
+                        if resp.status != 200:
+                            await update.message.reply_text("Could not upload APK to Transfer.sh")
+                            logger.error(f"Failed to upload APK to Transfer.sh: {resp.status}")
+                            os.remove(apk_path)
+                            return
+                        download_url = await resp.text()
+            await update.message.reply_text(f"APK too large for Telegram. Download from: {download_url}")
+            logger.info(f"Uploaded APK to Transfer.sh: {download_url}")
 
         # Send modified icon as document
         await update.message.reply_document(document=icon_buffer,
                                          filename=f"{app_title}_icon.png",
                                          caption=f"{app_title} Renamed Icon")
-
-        # Send APK download URL
-        await update.message.reply_text(f"APK re-uploaded with original name: {download_url}")
-        logger.info(f"Sent APK URL for {app_title}: {download_url}")
+        logger.info(f"Sent icon for {app_title}")
 
         # Clean up
         os.remove(apk_path)
@@ -127,6 +175,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_apk))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
     app.run_polling()
