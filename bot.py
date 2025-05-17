@@ -15,7 +15,7 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logging.getLogger('httpx').setLevel(logging.WARNING)  # Suppress httpx logs
 logger = logging.getLogger(__name__)
 
-CHUNK_SIZE = 50 * 1024 * 1024  # 50MB
+WEB_SERVER_URL = "http://localhost:8000"  # Local FastAPI server
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -41,34 +41,30 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apk_path = os.path.join(temp_dir, file.file_name)
 
     try:
-        # Download APK (handle large files)
-        file_obj = await file.get_file()
+        # Check file size
         file_size = file.file_size
-        logger.info(f"Downloading APK: {file.file_name} ({file_size} bytes)")
+        logger.info(f"Processing APK: {file.file_name} ({file_size} bytes)")
 
-        if file_size <= CHUNK_SIZE:
-            # Direct download for ≤50MB
+        if file_size <= 50 * 1024 * 1024:
+            # Download directly for ≤50MB
+            file_obj = await file.get_file()
             await file_obj.download_to_drive(apk_path)
         else:
-            # Chunked download for >50MB
-            chunks = []
-            offset = 0
-            while offset < file_size:
-                chunk_path = os.path.join(temp_dir, f"chunk_{offset}.part")
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(file_obj.file_path, headers={'Range': f'bytes={offset}-{offset+CHUNK_SIZE-1}'}) as resp:
-                        if resp.status != 206:
-                            raise Exception("Chunk download failed")
-                        with open(chunk_path, 'wb') as f:
-                            f.write(await resp.read())
-                chunks.append(chunk_path)
-                offset += CHUNK_SIZE
-            # Reassemble chunks
-            with open(apk_path, 'wb') as f:
-                for chunk_path in chunks:
-                    with open(chunk_path, 'rb') as cf:
-                        f.write(cf.read())
-                    os.remove(chunk_path)
+            # Upload to web server for >50MB
+            file_obj = await file.get_file()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_obj.file_path) as resp:
+                    if resp.status != 200:
+                        raise Exception("Failed to download APK")
+                    async with session.post(f"{WEB_SERVER_URL}/upload", data={"file": await resp.read()}) as upload_resp:
+                        if upload_resp.status != 200:
+                            raise Exception("Failed to upload to web server")
+                        apk_url = (await upload_resp.json())["url"]
+                async with session.get(apk_url) as download_resp:
+                    if download_resp.status != 200:
+                        raise Exception("Failed to download from web server")
+                    with open(apk_path, 'wb') as f:
+                        f.write(await download_resp.read())
 
         # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
@@ -118,33 +114,22 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Processed icon for {app_title}")
 
         # Re-upload files
-        if file_size <= CHUNK_SIZE:
-            # Direct upload for ≤50MB
+        if file_size <= 50 * 1024 * 1024:
+            # Direct upload to Telegram for ≤50MB
             await update.message.reply_document(document=open(apk_path, "rb"),
                                              filename=file.file_name,
                                              caption=f"{app_title} APK")
             logger.info(f"Re-uploaded APK to Telegram: {file.file_name}")
         else:
-            # Chunked upload for >50MB
-            chunk_paths = []
-            with open(apk_path, 'rb') as f:
-                while True:
-                    chunk = f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    chunk_path = os.path.join(temp_dir, f"chunk_{len(chunk_paths)}.part")
-                    with open(chunk_path, 'wb') as cf:
-                        cf.write(chunk)
-                    chunk_paths.append(chunk_path)
-            for i, chunk_path in enumerate(chunk_paths):
-                await update.message.reply_document(document=open(chunk_path, "rb"),
-                                                 filename=f"{file.file_name}.part{i}",
-                                                 caption=f"Chunk {i+1} of {app_title} APK")
-                logger.info(f"Uploaded chunk {i+1} for {file.file_name}")
-            await update.message.reply_text(
-                f"APK >50MB split into {len(chunk_paths)} chunks. "
-                "Download all parts and combine with: cat {file.file_name}.part* > {file.file_name}"
-            )
+            # Upload to web server for >50MB
+            async with aiohttp.ClientSession() as session:
+                with open(apk_path, 'rb') as f:
+                    async with session.post(f"{WEB_SERVER_URL}/upload", data={"file": f}) as resp:
+                        if resp.status != 200:
+                            raise Exception("Failed to upload APK to web server")
+                        apk_url = (await resp.json())["url"]
+            await update.message.reply_text(f"APK re-uploaded: {apk_url}")
+            logger.info(f"Re-uploaded APK to web server: {apk_url}")
 
         # Send modified icon
         await update.message.reply_document(document=icon_buffer,
