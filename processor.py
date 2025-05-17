@@ -1,5 +1,6 @@
 from telethon import TelegramClient, events
 from telethon.tl.types import DocumentAttributeFilename
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 import google_play_scraper as gps
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
@@ -118,7 +119,18 @@ async def main():
         logger.debug("Starting telethon client")
         await client.start(phone=config.PHONE_NUMBER)
         logger.info("Processor started")
+        # Verify channel access
+        try:
+            await client.get_entity(config.PROCESSING_CHANNEL_ID)
+            logger.debug(f"Successfully accessed channel: {config.PROCESSING_CHANNEL_ID}")
+        except Exception as e:
+            logger.error(f"Cannot access channel {config.PROCESSING_CHANNEL_ID}: {str(e)}")
+            return
         await client.run_until_disconnected()
+    except SessionPasswordNeededError:
+        logger.error("2FA required. Please run processor.py manually and enter the password.")
+    except FloodWaitError as e:
+        logger.error(f"Flood wait error. Please wait {e.seconds} seconds and retry.")
     except Exception as e:
         logger.error(f"Failed to start processor: {str(e)}")
 
