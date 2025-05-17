@@ -8,7 +8,7 @@ import os
 import config
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send an APK file, and I'll fetch its icon, rename it, and send both back!")
+    await update.message.reply_text("Send an APK file (up to 50MB). I'll fetch its icon, rename it, and send both back!")
 
 async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = update.message.document
@@ -16,13 +16,18 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send an APK file!")
         return
 
-    # Extract app name from filename (remove .apk)
+    # Check file size (Telegram limit: 50MB)
+    if file.file_size > 50 * 1024 * 1024:
+        await update.message.reply_text("File too large (>50MB). Telegram bots can't handle files this big. Consider uploading to a file host and sharing the link.")
+        return
+
+    # Extract app name from filename
     app_name = os.path.splitext(file.file_name)[0]
+    apk_path = f"{app_name}.apk"  # Initialize apk_path
 
     try:
         # Download APK
         file_obj = await file.get_file()
-        apk_path = f"{app_name}.apk"
         await file_obj.download_to_drive(apk_path)
 
         # Search for app on Google Play
