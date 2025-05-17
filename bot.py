@@ -41,30 +41,32 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apk_path = os.path.join(temp_dir, file.file_name)
 
     try:
-        # Check file size
         file_size = file.file_size
         logger.info(f"Processing APK: {file.file_name} ({file_size} bytes)")
 
+        # Download APK
+        file_obj = await file.get_file()
         if file_size <= 50 * 1024 * 1024:
-            # Download directly for ≤50MB
-            file_obj = await file.get_file()
+            # Direct download for ≤50MB
             await file_obj.download_to_drive(apk_path)
+            logger.info(f"Downloaded APK directly: {apk_path}")
         else:
-            # Upload to web server for >50MB
-            file_obj = await file.get_file()
+            # Download and upload to web server for >50MB
             async with aiohttp.ClientSession() as session:
                 async with session.get(file_obj.file_path) as resp:
                     if resp.status != 200:
-                        raise Exception("Failed to download APK")
-                    async with session.post(f"{WEB_SERVER_URL}/upload", data={"file": await resp.read()}) as upload_resp:
+                        raise Exception("Failed to download APK from Telegram")
+                    # Stream file to web server
+                    async with session.post(f"{WEB_SERVER_URL}/upload/{file.file_name}", data=resp.content) as upload_resp:
                         if upload_resp.status != 200:
-                            raise Exception("Failed to upload to web server")
+                            raise Exception(f"Failed to upload to web server: {await upload_resp.text()}")
                         apk_url = (await upload_resp.json())["url"]
                 async with session.get(apk_url) as download_resp:
                     if download_resp.status != 200:
                         raise Exception("Failed to download from web server")
                     with open(apk_path, 'wb') as f:
                         f.write(await download_resp.read())
+            logger.info(f"Downloaded APK via web server: {apk_path}")
 
         # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
@@ -124,9 +126,9 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Upload to web server for >50MB
             async with aiohttp.ClientSession() as session:
                 with open(apk_path, 'rb') as f:
-                    async with session.post(f"{WEB_SERVER_URL}/upload", data={"file": f}) as resp:
+                    async with session.post(f"{WEB_SERVER_URL}/upload/{file.file_name}", data=f) as resp:
                         if resp.status != 200:
-                            raise Exception("Failed to upload APK to web server")
+                            raise Exception(f"Failed to upload APK to web server: {await resp.text()}")
                         apk_url = (await resp.json())["url"]
             await update.message.reply_text(f"APK re-uploaded: {apk_url}")
             logger.info(f"Re-uploaded APK to web server: {apk_url}")
