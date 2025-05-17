@@ -2,3 +2,4 @@ python-telegram-bot
 google-play-scraper
 aiohttp
 Pillow
+watchdog
