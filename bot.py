@@ -4,11 +4,10 @@ import google_play_scraper as gps
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 import io
-import os
 import config
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send an APK file (up to 50MB). I'll fetch its icon, rename it, and send both back!")
+    await update.message.reply_text("Send an APK file (any size). I'll fetch its icon, rename it, and guide you to rename the APK locally!")
 
 async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = update.message.document
@@ -16,25 +15,14 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send an APK file!")
         return
 
-    # Check file size (Telegram limit: 50MB)
-    if file.file_size > 50 * 1024 * 1024:
-        await update.message.reply_text("File too large (>50MB). Telegram bots can't handle files this big. Consider uploading to a file host and sharing the link.")
-        return
-
     # Extract app name from filename
     app_name = os.path.splitext(file.file_name)[0]
-    apk_path = f"{app_name}.apk"  # Initialize apk_path
 
     try:
-        # Download APK
-        file_obj = await file.get_file()
-        await file_obj.download_to_drive(apk_path)
-
         # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
         if not results:
             await update.message.reply_text(f"No app found for '{app_name}'")
-            os.remove(apk_path)
             return
 
         # Get app details
@@ -48,7 +36,6 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get(icon_url) as resp:
                 if resp.status != 200:
                     await update.message.reply_text(f"Could not download icon for '{app_title}'")
-                    os.remove(apk_path)
                     return
                 icon_data = await resp.read()
 
@@ -70,22 +57,19 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon_img.save(icon_buffer, format="PNG")
         icon_buffer.seek(0)
 
-        # Send original APK
-        await update.message.reply_document(document=open(apk_path, "rb"),
-                                         filename=f"{app_title}.apk",
-                                         caption=f"{app_title} APK")
-
         # Send modified icon as document
         await update.message.reply_document(document=icon_buffer,
                                          filename=f"{app_title}_icon.png",
                                          caption=f"{app_title} Renamed Icon")
 
-        # Clean up
-        os.remove(apk_path)
+        # Instruct user to rename APK locally
+        await update.message.reply_text(
+            f"Please rename your APK file locally to: **{app_title}.apk**\n"
+            "Due to Telegram's file size limits, I can't process the APK directly, but you can rename it on your device."
+        )
+
     except Exception as e:
         await update.message.reply_text(f"Error: {str(e)}")
-        if os.path.exists(apk_path):
-            os.remove(apk_path)
 
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
