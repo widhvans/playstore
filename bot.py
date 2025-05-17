@@ -8,15 +8,28 @@ import os
 import config
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send an app name to download its APK and renamed icon!")
+    await update.message.reply_text("Send an APK file, and I'll fetch its icon, rename it, and send both back!")
 
-async def get_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    app_name = update.message.text
+async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.document
+    if not file.file_name.endswith('.apk'):
+        await update.message.reply_text("Please send an APK file!")
+        return
+
+    # Extract app name from filename (remove .apk)
+    app_name = os.path.splitext(file.file_name)[0]
+
     try:
-        # Search for the app
+        # Download APK
+        file_obj = await file.get_file()
+        apk_path = f"{app_name}.apk"
+        await file_obj.download_to_drive(apk_path)
+
+        # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
         if not results:
             await update.message.reply_text(f"No app found for '{app_name}'")
+            os.remove(apk_path)
             return
 
         # Get app details
@@ -30,22 +43,15 @@ async def get_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get(icon_url) as resp:
                 if resp.status != 200:
                     await update.message.reply_text(f"Could not download icon for '{app_title}'")
+                    os.remove(apk_path)
                     return
                 icon_data = await resp.read()
-
-            # Simulate APK download (replace with real APK source)
-            apk_url = f"https://apkpure.com/{app_id}/download"  # Placeholder
-            async with session.get(apk_url) as apk_resp:
-                if apk_resp.status != 200:
-                    await update.message.reply_text(f"Could not download APK for '{app_title}'")
-                    return
-                apk_data = await apk_resp.read()
 
         # Process icon: add app name as text
         icon_img = Image.open(io.BytesIO(icon_data)).convert("RGBA")
         draw = ImageDraw.Draw(icon_img)
         try:
-            font = ImageFont.truetype("arial.ttf", 20)  # Ensure font is available
+            font = ImageFont.truetype("arial.ttf", 20)
         except:
             font = ImageFont.load_default()
         text_bbox = draw.textbbox((0, 0), app_title, font=font)
@@ -59,13 +65,8 @@ async def get_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon_img.save(icon_buffer, format="PNG")
         icon_buffer.seek(0)
 
-        # Save APK temporarily
-        apk_filename = f"{app_title}.apk"
-        with open(apk_filename, "wb") as f:
-            f.write(apk_data)
-
-        # Send APK
-        await update.message.reply_document(document=open(apk_filename, "rb"),
+        # Send original APK
+        await update.message.reply_document(document=open(apk_path, "rb"),
                                          filename=f"{app_title}.apk",
                                          caption=f"{app_title} APK")
 
@@ -75,14 +76,16 @@ async def get_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                          caption=f"{app_title} Renamed Icon")
 
         # Clean up
-        os.remove(apk_filename)
+        os.remove(apk_path)
     except Exception as e:
         await update.message.reply_text(f"Error: {str(e)}")
+        if os.path.exists(apk_path):
+            os.remove(apk_path)
 
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_app))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_apk))
     app.run_polling()
 
 if __name__ == '__main__':
