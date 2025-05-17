@@ -2,4 +2,5 @@ python-telegram-bot
 google-play-scraper
 aiohttp
 Pillow
-watchdog
+fastapi
+uvicorn
