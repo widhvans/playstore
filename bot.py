@@ -1,59 +1,36 @@
+from telethon import TelegramClient, events
+import config
 import os
-import time
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from config import TOKEN
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
+client = TelegramClient('bot', config.API_ID, config.API_HASH).start(bot_token=config.BOT_TOKEN)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send any file to download and upload as a document.")
+@client.on(events.NewMessage(pattern='/start'))
+async def start(event):
+    await event.reply('Send me a file to download and re-upload as a document!')
+    raise events.StopPropagation
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = await update.message.document.get_file() if update.message.document else await update.message.photo[-1].get_file()
-    file_name = update.message.document.file_name if update.message.document else f"photo_{int(time.time())}.jpg"
-    
-    status_message = await update.message.reply_text("Downloading: 0%")
-    
-    # Download file
-    file_path = f"downloads/{file_name}"
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    await file.download_to_drive(file_path)
-    
-    await status_message.edit_text("Downloading: 100%\nUploading: 0%")
-    
-    # Upload as document
-    with open(file_path, 'rb') as f:
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=f,
-            caption="Uploaded document",
-            disable_notification=True
-        )
-    
-    await status_message.edit_text("Uploading: 100%\nCompleted!")
-    
-    # Clean up
-    os.remove(file_path)
-    
-    # Flood control
-    time.sleep(5)
+@client.on(events.NewMessage(incoming=True))
+async def handle_file(event):
+    if event.message.file:
+        try:
+            # Download the file
+            file_path = await event.message.download_media()
+            file_name = event.message.file.name or 'downloaded_file'
+            
+            # Re-upload as document
+            await client.send_file(
+                event.chat_id,
+                file_path,
+                caption='Re-uploaded as document',
+                force_document=True
+            )
+            
+            # Clean up
+            os.remove(file_path)
+            await event.reply('File re-uploaded successfully!')
+        except Exception as e:
+            await event.reply(f'Error: {str(e)}')
+    else:
+        await event.reply('Please send a file!')
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error {context.error}")
-    if update:
-        await update.message.reply_text("An error occurred. Please try again.")
-
-def main():
-    app = Application.builder().token(TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
-    app.add_error_handler(error_handler)
-    
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+client.run_until_disconnected()
