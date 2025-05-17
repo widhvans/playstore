@@ -28,11 +28,9 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Forward message to processing channel
-        forwarded_message = await update.message.forward(chat_id=config.PROCESSING_CHANNEL_ID)
+        await update.message.forward(chat_id=config.PROCESSING_CHANNEL_ID)
         logger.info(f"Forwarded APK: {file.file_name} ({file.file_size} bytes)")
         await update.message.reply_text("APK forwarded for processing. Please wait for results.")
-        # Monitor channel for results
-        context.user_data['forwarded_message_id'] = forwarded_message.message_id
     except Exception as e:
         logger.error(f"Error forwarding {file.file_name}: {str(e)}")
         await update.message.reply_text(f"Error: {str(e)}")
@@ -40,10 +38,12 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_channel_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.channel_post and update.channel_post.chat_id == config.PROCESSING_CHANNEL_ID:
         if update.channel_post.document and update.channel_post.document.file_name.endswith(('.apk', '.png')):
-            forwarded_message_id = context.user_data.get('forwarded_message_id')
-            if forwarded_message_id and update.channel_post.reply_to_message and update.channel_post.reply_to_message.message_id == forwarded_message_id:
-                await update.channel_post.forward(chat_id=update.effective_user.id)
-                logger.info(f"Forwarded result: {update.channel_post.document.file_name}")
+            # Forward results to the original user
+            if update.channel_post.reply_to_message:
+                original_user_id = update.channel_post.reply_to_message.forward_from.id if update.channel_post.reply_to_message.forward_from else None
+                if original_user_id:
+                    await update.channel_post.forward(chat_id=original_user_id)
+                    logger.info(f"Forwarded result: {update.channel_post.document.file_name} to user {original_user_id}")
 
 def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
