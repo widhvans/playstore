@@ -13,7 +13,10 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send an APK file (up to 50MB). I'll add the app name to its icon and re-upload both. For larger files, use an external file host.")
+    await update.message.reply_text(
+        "Send an APK file (≤50MB) or a URL to an APK (up to 500MB). I'll add the app name to its icon and re-upload both. "
+        "For >50MB files, upload to https://transfer.sh and share the link."
+    )
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
@@ -22,13 +25,15 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = update.message.document
-    if not file.file_name.endswith('.apk'):
-        await update.message.reply_text("Please send an APK file!")
+    if not file or not file.file_name.endswith('.apk'):
+        await update.message.reply_text("Please send an APK file or a URL to an APK!")
         return
 
-    # Check file size (Telegram limit: 50MB)
+    # Check file size
     if file.file_size > 50 * 1024 * 1024:
-        await update.message.reply_text("File too large (>50MB). Telegram bots can't handle this. Upload to a file host (e.g., Google Drive) and share the link.")
+        await update.message.reply_text(
+            "File >50MB. Please upload to https://transfer.sh and send the download URL."
+        )
         return
 
     # Extract app name from filename
@@ -36,11 +41,48 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apk_path = f"{app_name}.apk"
 
     try:
-        # Download APK
+        # Download APK from Telegram
         file_obj = await file.get_file()
         await file_obj.download_to_drive(apk_path)
         logger.info(f"Downloaded APK: {apk_path}")
 
+        await process_apk(update, app_name, apk_path, file.file_name)
+    except Exception as e:
+        logger.error(f"Error processing {app_name}: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
+        if os.path.exists(apk_path):
+            os.remove(apk_path)
+
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
+    if not url.startswith('http') or not url.lower().endswith('.apk'):
+        await update.message.reply_text("Please send a valid APK URL!")
+        return
+
+    # Extract app name from URL
+    app_name = os.path.splitext(os.path.basename(url))[0]
+    apk_path = f"{app_name}.apk"
+
+    try:
+        # Download APK from URL
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await update.message.reply_text(f"Could not download APK from URL")
+                    return
+                with open(apk_path, 'wb') as f:
+                    f.write(await resp.read())
+        logger.info(f"Downloaded APK from URL: {apk_path}")
+
+        await process_apk(update, app_name, apk_path, f"{app_name}.apk")
+    except Exception as e:
+        logger.error(f"Error processing URL {url}: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")
+        if os.path.exists(apk_path):
+            os.remove(apk_path)
+
+async def process_apk(update: Update, app_name: str, apk_path: str, original_filename: str):
+    try:
         # Search for app on Google Play
         results = gps.search(app_name, lang='en', country='us')
         if not results:
@@ -83,10 +125,25 @@ async def handle_apk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon_buffer.seek(0)
         logger.info(f"Processed icon for {app_title}")
 
-        # Send original APK with same name
-        await update.message.reply_document(document=open(apk_path, "rb"),
-                                         filename=file.file_name,
-                                         caption=f"{app_title} APK")
+        # Check APK size for re-upload
+        apk_size = os.path.getsize(apk_path)
+        if apk_size <= 50 * 1024 * 1024:
+            # Send original APK with same name
+            await update.message.reply_document(document=open(apk_path, "rb"),
+                                             filename=original_filename,
+                                             caption=f"{app_title} APK")
+        else:
+            # Upload to Transfer.sh for >50MB
+            async with aiohttp.ClientSession() as session:
+                with open(apk_path, 'rb') as f:
+                    async with session.put(f"https://transfer.sh/{original_filename}", data=f) as resp:
+                        if resp.status != 200:
+                            await update.message.reply_text(f"Could not upload APK to Transfer.sh")
+                            os.remove(apk_path)
+                            return
+                        download_url = await resp.text()
+            await update.message.reply_text(f"APK too large for Telegram. Download from: {download_url}")
+            logger.info(f"Uploaded APK to Transfer.sh: {download_url}")
 
         # Send modified icon as document
         await update.message.reply_document(document=icon_buffer,
@@ -107,6 +164,7 @@ def main():
     app = Application.builder().token(config.BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_apk))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     app.add_error_handler(error_handler)
     app.run_polling()
 
